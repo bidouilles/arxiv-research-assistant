@@ -423,7 +423,7 @@ Return JSON only.""",
 def format_reference(paper: ArxivPaper) -> str:
     """
     Format a paper reference with reference ID for cross-referencing.
-    Format: [ref_id] Authors (Year). Title. arXiv:ID
+    Format: [ref_id] Authors (Year). Title. [arXiv:ID](https://arxiv.org/abs/ID)
     """
     authors = ", ".join(paper.authors[:3]) + (
         " et al." if len(paper.authors) > 3 else ""
@@ -431,7 +431,8 @@ def format_reference(paper: ArxivPaper) -> str:
     year = paper.published.year
     arxiv_id = paper.url.split("/")[-1]
     reference = (
-        f"[{paper.reference_id}] {authors} ({year}). {paper.title}. arXiv:{arxiv_id}"
+        f"[{paper.reference_id}] {authors} ({year}). {paper.title}. "
+        f"[arXiv:{arxiv_id}](https://arxiv.org/abs/{arxiv_id})"
     )
     logger.debug(f"Formatted reference: {reference}")
     return reference
