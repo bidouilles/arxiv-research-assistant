@@ -82,32 +82,68 @@ agent = Agent[PipelineState, AcademicPaper](
     model=model,
     deps_type=PipelineState,
     result_type=AcademicPaper,
-    # system_prompt here will instruct the model on how to use the tools,
-    # the result schema, and your "workflow" instructions.
-    system_prompt=(
-        "You are an academic research assistant tasked with producing a comprehensive state-of-the-art paper with access to function tools. "
-        "Given the user's original query (stored in `original_query`), you must:\n\n"
-        "1) Refine the query using the refine_query(...) tool.\n"
-        "2) Search arXiv via arxiv_search(...).\n"
-        "3) For each paper found, call evaluate_paper(...) to decide if we include it.\n"
-        "4) Finally, Synthesize findings into structured academic paper in a AcademicPaper with the fields:\n"
-        "- Title: Create a concise technical title reflecting the research focus\n"
-        "- Abstract: Synthesize key contributions from included papers\n"
-        "- Introduction: Contextualize the field using paper publication dates and stated motivations\n"
-        "- literature_review: Compare/contrast approaches from papers using their reference_ids\n"
-        "- Methodology: Analyze technical methods from papers' abstract and titles\n"
-        "- Results: Summarize empirical findings explicitly stated in papers\n"
-        "- Discussion: Identify trends/gaps BASED ON ACTUAL PAPER CONTENTS\n"
-        "- Conclusion: Highlight validated future directions from paper conclusions\n"
-        "- References: Format using arXiv IDs from included papers ONLY\n"
-        "- Keywords: Extract from paper titles/abstracts, no inventions\n\n"
-        "IMPORTANT:\n"
-        " - Only use the provided tools to gather info or refine. Do not fabricate.\n"
-        " - If no relevant papers are found, produce an empty list.\n"
-        " - Use function calls for all structured steps.\n"
-        " - End the run with a valid AcademicPaper object."
-        " - Maintain academic tone and critical analysis throughout."
-    ),
+    system_prompt="""You are an academic research assistant tasked with producing a state-of-the-art literature review.
+
+Workflow Steps:
+1. Call refine_query() to optimize the original_query for arXiv search
+2. Use arxiv_search() to retrieve relevant papers
+3. For each paper, call evaluate_paper() to assess inclusion
+4. Synthesize findings into an AcademicPaper with the following fields:
+
+Required Fields:
+
+title: str
+- Technical title reflecting core research focus
+- Use standard academic paper naming conventions
+
+abstract: str
+- Comprehensive summary of key findings
+- Follow standard academic abstract structure
+
+introduction: str
+- Context and motivation from referenced papers
+- Clear research objectives and scope
+
+literature_review: str
+- Critical analysis of approaches using [ref_X] citations
+- Compare methodologies and findings across papers
+
+methodology: str
+- Technical analysis of methods from papers
+- Focus on reproducible approaches and implementations
+
+results: str
+- Synthesize quantitative and qualitative findings
+- Only include results explicitly stated in papers
+- Use concrete numbers and metrics when available
+
+discussion: str
+- Analyze trends, patterns, and research gaps
+- Base analysis strictly on included papers
+- Compare strengths and limitations of approaches
+
+conclusion: str
+- Summarize key insights and contributions
+- Present future directions supported by findings
+
+references: List[str]
+- Only include evaluated papers marked for inclusion
+- Use provided reference_ids consistently for citations
+- Follow the [ref_X] format
+
+keywords: List[str]
+- Extract directly from paper titles and abstracts
+- No synthesized or inferred keywords
+- Focus on technical and domain-specific terms
+
+Guidelines:
+- Maintain formal academic writing style
+- Use [ref_X] format for all in-text citations
+- Only include content from evaluated papers
+- Return a valid AcademicPaper object
+- Each section should reference multiple papers where appropriate
+- Maintain consistent terminology throughout
+- Ensure all claims are supported by citations""",
 )
 
 # -------------- Tools --------------
@@ -134,9 +170,7 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
             "   - ti: for title search\n"
             "   - au: for author search\n"
             "   - abs: for abstract search\n"
-            "   - co: for comments\n"
-            "   - jr: for journal reference\n"
-            "   - cat: for subject category\n"
+            "   - all: all fields\n"
             "2. For phrases, use double quotes (normal quotes, not encoded)\n"
             "3. Use proper Boolean operators:\n"
             "   - AND (default between terms)\n"
@@ -148,6 +182,8 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
             "7. Focus on technical/scientific terminology\n"
             "8. Consider key methodologies or techniques\n\n"
             "Examples:\n"
+            'Input: "bgp quic secure transport"\n'
+            'Output: all:"BGP" AND (all:"TLS" OR all:"QUIC" OR all:"secure transport")\n\n'
             'Input: "deep learning for computer vision"\n'
             'Output: (ti:"deep learning" OR abs:"deep learning") AND ("computer vision" OR "image recognition" OR "visual recognition")\n\n'
             'Input: "quantum computing optimization"\n'
@@ -255,26 +291,25 @@ async def evaluate_paper(
 
     prompt = {
         "role": "system",
-        "content": (
-            "Evaluate if this paper is highly relevant to the search query. "
-            "Consider: relevance to query, methodology, and novelty. "
-            "Score 0-1 considering: "
-            "- Technical rigor "
-            "- Innovation level "
-            "- Citation potential   "
-            "- Methodology soundness "
-            "- Results significance "
-            """Return JSON: {"score": 0.75, "reason": "a few words explanation"}"""
-        ),
+        "content": """You are a paper evaluator that returns ONLY a JSON object.
+Format: {"score": float between 0-1, "reason": "brief explanation"}
+
+Evaluate paper relevance based on:
+- Technical match with query
+- Methodology quality
+- Results significance
+- Innovation level
+
+Return ONLY the JSON object, nothing else.""",
     }
 
     user_message = {
         "role": "user",
-        "content": (
-            f"Query: {ctx.deps.original_query}\n"
-            f"Title: {paper.title}\n"
-            f"Abstract: {paper.abstract}"
-        ),
+        "content": f"""Query: {ctx.deps.original_query}
+Title: {paper.title}
+Abstract: {paper.abstract}
+
+Return JSON only.""",
     }
 
     response = await ctx.deps.openai_client.chat.completions.create(
@@ -282,15 +317,29 @@ async def evaluate_paper(
         messages=[prompt, user_message],
         temperature=0.2,
         max_tokens=100,
+        response_format={"type": "json_object"},
     )
 
-    # Parse response to boolean
-    print(response.choices[0].message.content)
-    evaluation = json.loads(response.choices[0].message.content)
+    response_text = response.choices[0].message.content
+    if not response_text:
+        raise ValueError("Empty response from model")
+
+    # Parse JSON response
+    try:
+        evaluation = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {e}")
+        print(f"Response text: {response_text}")
+        # Fallback scoring if JSON parsing fails
+        evaluation = {"score": 0.0, "reason": "Failed to parse evaluation"}
+
+    # Validate score range
+    score = float(evaluation.get("score", 0.0))
+    score = max(0.0, min(1.0, score))  # Clamp between 0 and 1
 
     # Update paper in state
-    paper.relevance_score = evaluation["score"]
-    paper.include = paper.relevance_score >= 0.7  # Threshold for inclusion
+    paper.relevance_score = score
+    paper.include = score >= 0.7  # Threshold for inclusion
 
     print(
         f"Evaluated {paper.title}: Score {paper.relevance_score:.2f} - Reason: {evaluation['reason']}"
