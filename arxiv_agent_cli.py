@@ -105,20 +105,50 @@ agent = Agent[PipelineState, SummaryReport](
 @agent.tool  # Tool #1
 async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
     """
-    Improve the search query with synonyms, relevant subtopics, etc.
-    Return only the refined query string.
+    Improve the search query specifically for arXiv's search engine with date filtering.
+    Return only the refined query string in unencoded format for the Python arxiv library.
     """
+    # Calculate date range for last 3 years
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    from_date = f"{current_year-3}{str(current_month).zfill(2)}010000"
+    to_date = f"{current_year}{str(current_month).zfill(2)}312359"
+
     prompt = {
         "role": "system",
         "content": (
-            "You are an expert in refining academic search queries. "
-            "Analyze the query and suggest an improved version for arXiv search. "
-            "Add relevant keywords, synonyms, and structure the query to maximize result accuracy. "
-            "Return only the refined query string, no other text."
+            "You are an expert in crafting arXiv search queries. Your task is to refine the given query "
+            "following these specific guidelines:\n\n"
+            "1. Use arXiv's field prefixes:\n"
+            "   - ti: for title search\n"
+            "   - au: for author search\n"
+            "   - abs: for abstract search\n"
+            "   - co: for comments\n"
+            "   - jr: for journal reference\n"
+            "   - cat: for subject category\n"
+            "2. For phrases, use double quotes (normal quotes, not encoded)\n"
+            "3. Use proper Boolean operators:\n"
+            "   - AND (default between terms)\n"
+            "   - OR (for alternatives)\n"
+            "   - ANDNOT (for exclusions)\n"
+            "4. Group expressions using normal parentheses ( )\n"
+            "5. Include relevant synonyms and alternative phrasings with OR\n"
+            "6. Use regular spaces, not plus signs\n"
+            "7. Focus on technical/scientific terminology\n"
+            "8. Consider key methodologies or techniques\n\n"
+            "Examples:\n"
+            'Input: "deep learning for computer vision"\n'
+            'Output: (ti:"deep learning" OR abs:"deep learning") AND ("computer vision" OR "image recognition" OR "visual recognition")\n\n'
+            'Input: "quantum computing optimization"\n'
+            'Output: (ti:"quantum computing" OR abs:"quantum computing") AND (optimization OR "quantum optimization" OR QAOA)\n\n'
+            "Return ONLY the refined query string. The date range will be added automatically."
         ),
     }
 
-    user_message = {"role": "user", "content": f"Original query: {user_query}"}
+    user_message = {
+        "role": "user",
+        "content": f"Craft an arXiv search query for: {user_query}",
+    }
 
     response = await ctx.deps.openai_client.chat.completions.create(
         model=MODEL_NAME,
@@ -130,6 +160,11 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
     refined_query = response.choices[0].message.content
     if refined_query is None:
         refined_query = user_query
+
+    # Add date range to the query
+    date_filter = f" AND submittedDate:[{from_date} TO {to_date}]"
+    refined_query = refined_query + date_filter
+
     ctx.deps.refined_query = refined_query
     print(f"Refined query: {refined_query}")
     return refined_query
@@ -160,7 +195,7 @@ async def arxiv_search(
     """
     if not ctx.deps.refined_query:
         raise ModelRetry("No refined query found. Call refine_query(...) first.")
-    refined_q = ctx.deps.original_query
+    refined_q = ctx.deps.refined_query
     print(f"Refined query: {refined_q}")
 
     # Actually query arxiv
@@ -171,8 +206,6 @@ async def arxiv_search(
         sort_by=arxiv.SortCriterion.Relevance,
         sort_order=arxiv.SortOrder.Descending,
     )
-    for r in client.results(search):
-        print(r.title)
     # We'll gather results synchronously, but we want to be asynchronous
     # let's do a small async wrapper:
     results = []
@@ -196,7 +229,7 @@ async def arxiv_search(
     return results
 
 
-@agent.tool
+@agent.tool  # Tool #3
 async def evaluate_paper(
     ctx: RunContext[PipelineState], paper_index: int
 ) -> ArxivPaper:
@@ -212,22 +245,18 @@ async def evaluate_paper(
     prompt = {
         "role": "system",
         "content": (
-            "You are an expert in evaluating academic papers. "
-            "Given a paper's metadata and the original search query, "
-            "evaluate if the paper is highly relevant and contributes to the state of the art. "
-            "Consider factors like methodology, novelty, and clarity. "
-            "Respond with either 'true' or 'false' only."
+            "Evaluate if this paper is highly relevant to the search query. "
+            "Consider: relevance to query, methodology, and novelty. "
+            "Respond with only 'true' or 'false'."
         ),
     }
 
     user_message = {
         "role": "user",
         "content": (
-            f"Original query: {ctx.deps.original_query}\n\n"
-            f"Paper title: {paper.title}\n"
-            f"Authors: {', '.join(paper.authors)}\n"
-            f"Abstract: {paper.abstract}\n"
-            f"Published: {paper.published}"
+            f"Query: {ctx.deps.original_query}\n"
+            f"Title: {paper.title}\n"
+            f"Abstract: {paper.abstract}"
         ),
     }
 
@@ -241,7 +270,7 @@ async def evaluate_paper(
     # Parse response to boolean
     include_paper = response.choices[0].message.content.strip().lower() == "true"
 
-    print(f"Paper {paper.title} is {'included' if include_paper else 'excluded'}")
+    print(f"Paper {paper.title} is {'INCLUDED' if include_paper else 'excluded'}")
 
     # Update paper in state
     paper.include = include_paper
@@ -267,7 +296,7 @@ async def run_pipeline(original_query: str) -> SummaryReport:
         papers=[],
         refined_query=None,
     )
-    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=10000)
+    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=15000)
 
     # We'll pass the user's prompt as the initial user message
     # i.e. "I want to search for X"
