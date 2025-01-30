@@ -1,184 +1,204 @@
-# ArXiv Agent CLI
+# arXiv Research Assistant
 
-A command-line tool for generating comprehensive academic research papers based on arXiv searches.
+A powerful CLI tool that searches arXiv for academic papers, evaluates their relevance, and automatically generates comprehensive literature reviews. This tool uses GPT-4 to refine searches, evaluate papers, and synthesize findings into well-structured academic papers.
 
-## Overview
+## Features
 
-The ArXiv Agent CLI is a powerful tool that uses AI to search arXiv papers, evaluate their relevance, and automatically generate structured academic papers. It combines the capabilities of OpenAI's language models with arXiv's research database to create detailed literature reviews and research summaries.
+- 🔍 Smart query refinement optimized for arXiv's search engine
+- 📊 Automatic paper relevance scoring and filtering
+- 📝 Generates complete academic papers with proper citations
+- 🤖 Powered by GPT-4 for intelligent paper analysis
+- 📅 Configurable date range for recent research
+- 💾 Exports results in clean Markdown format
 
 ## Installation
 
-### Prerequisites
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/arxiv-research-assistant.git
+cd arxiv-research-assistant
 
-- Python 3.7+
-- OpenAI API key
-- Required Python packages (install via pip):
-  - arxiv
-  - pydantic
-  - pydantic-ai
-  - openai
-  - python-dotenv
-  - simplejson
-  - logfire
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-### Environment Setup
-
-1. Create a `.env` file in your project directory
-2. Add your OpenAI API key:
+# Install dependencies
+pip install -r requirements.txt
 ```
-OPENAI_API_KEY=your_key_here
-LLM_MODEL=gpt-4o-mini
+
+## Configuration
+
+1. Create a `.env` file in the project root:
+```env
+OPENAI_API_KEY=your_api_key_here
+LLM_MODEL=gpt-4o-mini  # or your preferred model
+```
+
+2. Make the script executable:
+```bash
+chmod +x arxiv_agent_cli.py
 ```
 
 ## Usage
 
-Basic command line usage:
-
 ```bash
-python arxiv_agent_cli.py "Your research query"
+python arxiv_agent_cli.py [options] "Your research query"
 ```
 
-Example:
+### Options
+
+- `-y, --years`: Number of years to look back (default: 5)
+- `-m, --max-results`: Maximum number of papers to retrieve (default: 10)
+- `-o, --output`: Output directory for generated markdown files (default: generated_papers)
+
+### Examples
+
+#### Computer Network Security with BGP
+
+1. BGP Security Research:
 ```bash
-python arxiv_agent_cli.py "Graph neural networks for large-scale optimization"
+python arxiv_agent_cli.py "BGP security mechanisms and attack prevention"
 ```
 
-## Features
-
-### 1. Query Refinement
-- Automatically improves search queries for arXiv's search engine
-- Uses field prefixes (ti:, au:, abs:, etc.)
-- Incorporates Boolean operators and proper syntax
-- Adds date filtering for recent papers
-
-### 2. Paper Search
-- Searches arXiv using refined queries
-- Retrieves detailed paper information including:
-  - Title
-  - Authors
-  - Abstract
-  - URL
-  - Publication date
-
-### 3. Paper Evaluation
-- Automatically evaluates paper relevance
-- Scores papers based on:
-  - Technical rigor
-  - Innovation level
-  - Citation potential
-  - Methodology soundness
-  - Results significance
-
-### 4. Academic Paper Generation
-Generates a structured academic paper with:
-- Title
-- Abstract
-- Introduction
-- Literature Review
-- Methodology
-- Results
-- Discussion
-- Conclusion
-- References
-- Keywords
-
-## Architecture
-
-### Data Models
-
-#### ArxivPaper
-```python
-class ArxivPaper(BaseModel):
-    title: str
-    authors: List[str]
-    abstract: str
-    url: str
-    published: datetime
-    reference_id: Optional[str]
-    include: bool
-    relevance_score: float
+2. RPKI and ROV Analysis:
+```bash
+python arxiv_agent_cli.py "RPKI and ROV deployment in BGP infrastructure"
 ```
 
-#### AcademicPaper
-```python
-class AcademicPaper(BaseModel):
-    title: str
-    abstract: str
-    introduction: str
-    literature_review: str
-    methodology: str
-    results: str
-    discussion: str
-    conclusion: str
-    references: List[str]
-    keywords: List[str]
+3. BGP with QUIC Integration:
+```bash
+python arxiv_agent_cli.py "BGP security with QUIC protocol integration"
 ```
 
-### Pipeline State
-```python
-@dataclass
-class PipelineState:
-    original_query: str
-    refined_query: str | None
-    papers: List[ArxivPaper]
-    openai_client: AsyncOpenAI
+4. BGP Route Leaks Prevention:
+```bash
+python arxiv_agent_cli.py "Detection and prevention of BGP route leaks"
 ```
 
-## Tools
+#### Sample Output Structure
 
-### 1. refine_query
-Improves the search query for arXiv's search engine with date filtering.
-
-### 2. arxiv_search
-Searches arXiv using the refined query and returns a list of ArxivPaper objects.
-
-### 3. evaluate_paper
-Evaluates individual papers for relevance and updates their inclusion status.
-
-## Output Format
-
-The tool generates a well-structured academic paper with clear section headers:
+The tool generates a comprehensive academic paper with the following sections:
 
 ```markdown
-# Paper Title
+# Title
 
 ## Abstract
-[Generated abstract]
+[Comprehensive summary of findings]
+
+## Keywords
+[Relevant technical terms]
 
 ## Introduction
-[Generated introduction]
+[Context and research objectives]
 
 ## Literature Review
-[Generated literature review]
+[Analysis of current research]
 
 ## Methodology
-[Generated methodology section]
+[Technical approaches used]
 
 ## Results
-[Generated results section]
+[Key findings and metrics]
 
 ## Discussion
-[Generated discussion]
+[Analysis and implications]
 
 ## Conclusion
-[Generated conclusion]
+[Summary and future directions]
 
 ## References
-- [Reference 1]
-- [Reference 2]
-...
+[Cited papers with arXiv links]
 ```
 
-## Error Handling
+## Agent Workflow
 
-- Validates input parameters
-- Handles API errors gracefully
-- Provides clear error messages for troubleshooting
-- Implements retry logic for failed API calls
+The research assistant uses a sophisticated agent-based architecture to process your queries and generate comprehensive literature reviews. Here's how it works:
 
-## Limitations
+### Pipeline Flow
 
-- Maximum of 10 papers per search by default
-- Requires OpenAI API access
-- Limited to papers available on arXiv
-- Papers must be from the last 5 years
+1. **Query Refinement (Tool 1)**
+   - Takes your natural language query
+   - Optimizes it for arXiv's search engine
+   - Adds field-specific prefixes and Boolean operators
+   - Includes date range filtering
+
+2. **arXiv Search (Tool 2)**
+   - Uses refined query to search arXiv
+   - Retrieves papers based on relevance
+   - Sorts results by importance
+   - Assigns unique reference IDs
+
+3. **Paper Evaluation (Tool 3)**
+   - Evaluates each paper individually
+   - Scores papers on 0-1 scale based on:
+     * Technical relevance
+     * Methodology quality
+     * Results significance
+     * Innovation level
+   - Papers with scores ≥ 0.7 are included
+
+4. **Paper Synthesis**
+   - Combines findings from included papers
+   - Generates structured academic paper
+   - Maintains consistent citations
+   - Creates coherent narrative
+
+The entire process is orchestrated by a GPT-4 powered agent that:
+- Maintains context throughout the pipeline
+- Makes intelligent decisions about paper inclusion
+- Ensures citation consistency
+- Generates academically rigorous output
+
+## Features in Detail
+
+### Query Refinement
+The tool automatically refines your search query using arXiv's field prefixes and Boolean operators:
+- `ti:` for title search
+- `abs:` for abstract search
+- `au:` for author search
+- Proper use of AND, OR, ANDNOT operators
+- Date range filtering
+
+### Paper Evaluation
+Each paper is automatically evaluated based on:
+- Technical relevance to the query
+- Methodology quality
+- Results significance
+- Innovation level
+
+### Output Generation
+- Markdown files with proper academic structure
+- In-text citations using [ref_X] format
+- Sorted references by relevance
+- Clean, readable formatting
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- arXiv API for providing access to research papers
+- OpenAI for GPT-4 API
+- All contributors and users of this tool
+
+## Citation
+
+If you use this tool in your research, please cite:
+
+```bibtex
+@software{arxiv_research_assistant,
+  author = {bidouilles},
+  title = {arXiv Research Assistant},
+  year = {2024},
+  url = {https://github.com/yourusername/arxiv-research-assistant}
+}
+```

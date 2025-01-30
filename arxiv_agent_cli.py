@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import List, Optional
 from dataclasses import dataclass
 import simplejson as json
+import argparse
 
 import arxiv
 from dotenv import load_dotenv
@@ -31,6 +32,8 @@ import logfire
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 MODEL_NAME = os.getenv("LLM_MODEL", "gpt-4o-mini")
+DEFAULT_YEAR_RANGE = 5  # Default to 5 years if not specified
+DEFAULT_ARXIV_MAX_RESULTS = 10  # Default to 10 results if not specified
 print(f"Using model: {MODEL_NAME}")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -72,6 +75,8 @@ class PipelineState:
     refined_query: str | None
     papers: List[ArxivPaper]
     openai_client: AsyncOpenAI
+    year_range: int
+    max_results: int
 
 
 # -------------- Model + Single Agent --------------
@@ -158,7 +163,7 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
     # Calculate date range for last 5 years
     current_year = datetime.now().year
     current_month = datetime.now().month
-    from_date = f"{current_year-5}{str(current_month).zfill(2)}010000"
+    from_date = f"{current_year-ctx.deps.year_range}{str(current_month).zfill(2)}010000"
     to_date = f"{current_year}{str(current_month).zfill(2)}312359"
 
     prompt = {
@@ -233,9 +238,7 @@ class AsyncIteratorWrapper:
 
 
 @agent.tool  # Tool #2
-async def arxiv_search(
-    ctx: RunContext[PipelineState], max_results: int = 10
-) -> List[ArxivPaper]:
+async def arxiv_search(ctx: RunContext[PipelineState]) -> List[ArxivPaper]:
     """
     Use the refined_query from the pipeline state to search on arXiv (CS category).
     Return a list of ArxivPaper objects with reference IDs.
@@ -249,7 +252,7 @@ async def arxiv_search(
     client = arxiv.Client()
     search = arxiv.Search(
         query=refined_q,
-        max_results=max_results,
+        max_results=ctx.deps.max_results,
         sort_by=arxiv.SortCriterion.Relevance,
         sort_order=arxiv.SortOrder.Descending,
     )
@@ -369,9 +372,17 @@ def format_reference(paper: ArxivPaper) -> str:
     return f"[{paper.reference_id}] {authors} ({year}). {paper.title}. arXiv:{arxiv_id}"
 
 
-async def run_pipeline(original_query: str) -> AcademicPaper:
+async def run_pipeline(
+    original_query: str,
+    year_range: int = DEFAULT_YEAR_RANGE,
+    max_results: int = DEFAULT_ARXIV_MAX_RESULTS,
+) -> AcademicPaper:
     """
     Kick off the single-run pipeline.
+    Args:
+        original_query: The search query
+        year_range: Number of years to look back (default: 5)
+
     The LLM is instructed to call the relevant function tools
     and eventually produce a AcademicPaper as final output.
     """
@@ -380,8 +391,10 @@ async def run_pipeline(original_query: str) -> AcademicPaper:
         openai_client=openai_client,
         papers=[],
         refined_query=None,
+        year_range=year_range,
+        max_results=max_results,
     )
-    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=20000)
+    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=25000)
 
     # We'll pass the user's prompt as the initial user message
     # i.e. "I want to search for X"
@@ -473,15 +486,52 @@ async def save_academic_paper_markdown(
 
 
 async def main():
-    if len(sys.argv) < 2:
-        print('Usage: python arxiv_agent_cli.py "Your query" [output_directory]')
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Search arXiv and generate academic literature review",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    %(prog)s "Graph neural networks for optimization"
+    %(prog)s --years 3 --output papers "Quantum computing advances"
+    %(prog)s --max-results 20 "Machine learning in biology"
+        """,
+    )
 
-    user_query = sys.argv[1]
-    # Allow optional output directory specification
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else "generated_papers"
+    parser.add_argument("query", type=str, help="Search query for arXiv papers")
 
-    report = await run_pipeline(user_query)
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="generated_papers",
+        help="Output directory for generated markdown files (default: generated_papers)",
+    )
+
+    parser.add_argument(
+        "-y",
+        "--years",
+        type=int,
+        default=DEFAULT_YEAR_RANGE,
+        help=f"Number of years to look back in search (default: {DEFAULT_YEAR_RANGE})",
+    )
+
+    parser.add_argument(
+        "-m",
+        "--max-results",
+        type=int,
+        default=DEFAULT_ARXIV_MAX_RESULTS,
+        help="Maximum number of papers to retrieve (default: 10)",
+    )
+
+    args = parser.parse_args()
+
+    # Run the pipeline with the specified parameters
+    report = await run_pipeline(
+        original_query=args.query,
+        year_range=args.years,
+        max_results=args.max_results,
+    )
+
     if not report:
         print("No summary report generated.")
         return
@@ -491,12 +541,12 @@ async def main():
 
     # Save to markdown file
     try:
-        output_file = await save_academic_paper_markdown(report, output_dir)
+        output_file = await save_academic_paper_markdown(report, args.output)
         print(f"\nMarkdown report saved to: {output_file}")
 
         # Print the contents of the output directory
-        files = os.listdir(output_dir)
-        print(f"\nContents of {output_dir}/:")
+        files = os.listdir(args.output)
+        print(f"\nContents of {args.output}/:")
         for file in files:
             print(f"- {file}")
 
