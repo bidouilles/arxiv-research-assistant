@@ -621,7 +621,7 @@ Examples:
             max_results=args.max_results,
         )
 
-        if not report:
+        if not report or report.references == []:
             logger.warning("No summary report generated.")
             return
 
