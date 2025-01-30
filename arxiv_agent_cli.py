@@ -118,7 +118,7 @@ Workflow Steps:
 1. Call refine_query() to optimize the original_query for arXiv search
 2. Use arxiv_search() to retrieve relevant papers
 3. For each paper, call evaluate_paper() to assess inclusion
-4. Synthesize findings into an AcademicPaper with the following fields:
+4. Synthesize findings from papers marked with include=True into an AcademicPaper with the following fields:
 
 Required Fields:
 
