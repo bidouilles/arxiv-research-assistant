@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 from typing import List, Optional
 from dataclasses import dataclass
+import simplejson as json
 
 import arxiv
 from dotenv import load_dotenv
@@ -47,15 +48,20 @@ class ArxivPaper(BaseModel):
     published: datetime = Field(default_factory=datetime.now)
     reference_id: Optional[str] = None
     include: bool = True  # whether we keep this paper
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0)  # New relevance scoring
 
 
-class SummaryReport(BaseModel):
-    query: str
+class AcademicPaper(BaseModel):
     title: str
-    papers: List[ArxivPaper]
-    summary: str
-    state_of_the_art_analysis: str
+    abstract: str
+    introduction: str
+    literature_review: str
+    methodology: str
+    results: str
+    discussion: str
+    conclusion: str
     references: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
 
 
 # This will be our "state" that the agent can read/write
@@ -72,30 +78,35 @@ class PipelineState:
 # Create an OpenAI model. Adjust temperature or other settings as desired.
 model = OpenAIModel(model_name=MODEL_NAME, api_key=OPENAI_API_KEY)
 
-agent = Agent[PipelineState, SummaryReport](
+agent = Agent[PipelineState, AcademicPaper](
     model=model,
     deps_type=PipelineState,
-    result_type=SummaryReport,
+    result_type=AcademicPaper,
     # system_prompt here will instruct the model on how to use the tools,
     # the result schema, and your "workflow" instructions.
     system_prompt=(
-        "You are an advanced academic research assistant with access to function tools. "
+        "You are an academic research assistant tasked with producing a comprehensive state-of-the-art paper with access to function tools. "
         "Given the user's original query (stored in `original_query`), you must:\n\n"
         "1) Refine the query using the refine_query(...) tool.\n"
         "2) Search arXiv via arxiv_search(...).\n"
         "3) For each paper found, call evaluate_paper(...) to decide if we include it.\n"
-        "4) Finally, return a SummaryReport with the fields:\n"
-        "   - query: The refined query.\n"
-        "   - title: A short academic-style title summarizing these papers.\n"
-        "   - papers: The included ArxivPaper objects.\n"
-        "   - summary: Summarize each included paper.\n"
-        "   - state_of_the_art_analysis: Provide an advanced analysis of the SoTA.\n"
-        "   - references: Provide a references list in the specified format.\n\n"
+        "4) Finally, Synthesize findings into structured academic paper in a AcademicPaper with the fields:\n"
+        "- Title: Create a concise technical title reflecting the research focus\n"
+        "- Abstract: Synthesize key contributions from included papers\n"
+        "- Introduction: Contextualize the field using paper publication dates and stated motivations\n"
+        "- literature_review: Compare/contrast approaches from papers using their reference_ids\n"
+        "- Methodology: Analyze technical methods from papers' abstract and titles\n"
+        "- Results: Summarize empirical findings explicitly stated in papers\n"
+        "- Discussion: Identify trends/gaps BASED ON ACTUAL PAPER CONTENTS\n"
+        "- Conclusion: Highlight validated future directions from paper conclusions\n"
+        "- References: Format using arXiv IDs from included papers ONLY\n"
+        "- Keywords: Extract from paper titles/abstracts, no inventions\n\n"
         "IMPORTANT:\n"
         " - Only use the provided tools to gather info or refine. Do not fabricate.\n"
         " - If no relevant papers are found, produce an empty list.\n"
         " - Use function calls for all structured steps.\n"
-        " - End the run with a valid SummaryReport object."
+        " - End the run with a valid AcademicPaper object."
+        " - Maintain academic tone and critical analysis throughout."
     ),
 )
 
@@ -108,10 +119,10 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
     Improve the search query specifically for arXiv's search engine with date filtering.
     Return only the refined query string in unencoded format for the Python arxiv library.
     """
-    # Calculate date range for last 3 years
+    # Calculate date range for last 5 years
     current_year = datetime.now().year
     current_month = datetime.now().month
-    from_date = f"{current_year-3}{str(current_month).zfill(2)}010000"
+    from_date = f"{current_year-5}{str(current_month).zfill(2)}010000"
     to_date = f"{current_year}{str(current_month).zfill(2)}312359"
 
     prompt = {
@@ -247,7 +258,13 @@ async def evaluate_paper(
         "content": (
             "Evaluate if this paper is highly relevant to the search query. "
             "Consider: relevance to query, methodology, and novelty. "
-            "Respond with only 'true' or 'false'."
+            "Score 0-1 considering: "
+            "- Technical rigor "
+            "- Innovation level "
+            "- Citation potential   "
+            "- Methodology soundness "
+            "- Results significance "
+            """Return JSON: {"score": 0.75, "reason": "a few words explanation"}"""
         ),
     }
 
@@ -264,31 +281,50 @@ async def evaluate_paper(
         model=MODEL_NAME,
         messages=[prompt, user_message],
         temperature=0.2,
-        max_tokens=50,
+        max_tokens=100,
     )
 
     # Parse response to boolean
-    include_paper = response.choices[0].message.content.strip().lower() == "true"
-
-    print(f"Paper {paper.title} is {'INCLUDED' if include_paper else 'excluded'}")
+    print(response.choices[0].message.content)
+    evaluation = json.loads(response.choices[0].message.content)
 
     # Update paper in state
-    paper.include = include_paper
+    paper.relevance_score = evaluation["score"]
+    paper.include = paper.relevance_score >= 0.7  # Threshold for inclusion
+
+    print(
+        f"Evaluated {paper.title}: Score {paper.relevance_score:.2f} - Reason: {evaluation['reason']}"
+    )
+
     ctx.deps.papers[paper_index] = paper
     return paper
 
 
 # -------------- Putting it All Together --------------
-# Because result_type=SummaryReport, the final output from the model must be
-# a valid SummaryReport. The agent can gather data from the pipeline state
+# Because result_type=AcademicPaper, the final output from the model must be
+# a valid AcademicPaper. The agent can gather data from the pipeline state
 # and produce it in structured form.
 
 
-async def run_pipeline(original_query: str) -> SummaryReport:
+# -------------- Paper Generation Logic --------------
+def format_reference(paper: ArxivPaper) -> str:
+    """
+    Format a paper reference with reference ID for cross-referencing.
+    Format: [ref_id] Authors (Year). Title. arXiv:ID
+    """
+    authors = ", ".join(paper.authors[:3]) + (
+        " et al." if len(paper.authors) > 3 else ""
+    )
+    year = paper.published.year
+    arxiv_id = paper.url.split("/")[-1]
+    return f"[{paper.reference_id}] {authors} ({year}). {paper.title}. arXiv:{arxiv_id}"
+
+
+async def run_pipeline(original_query: str) -> AcademicPaper:
     """
     Kick off the single-run pipeline.
     The LLM is instructed to call the relevant function tools
-    and eventually produce a SummaryReport as final output.
+    and eventually produce a AcademicPaper as final output.
     """
     pipeline_state = PipelineState(
         original_query=original_query,
@@ -296,7 +332,7 @@ async def run_pipeline(original_query: str) -> SummaryReport:
         papers=[],
         refined_query=None,
     )
-    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=15000)
+    usage_limits = UsageLimits(request_limit=20, total_tokens_limit=20000)
 
     # We'll pass the user's prompt as the initial user message
     # i.e. "I want to search for X"
@@ -306,40 +342,117 @@ async def run_pipeline(original_query: str) -> SummaryReport:
         deps=pipeline_state,
         usage_limits=usage_limits,
     )
+    included_papers = [p for p in pipeline_state.papers if p.include]
+    result.data.references = [
+        format_reference(p)
+        for p in sorted(included_papers, key=lambda x: x.relevance_score, reverse=True)
+    ]
     return result.data
 
 
+# -------------- Enhanced Output Formatting --------------
+def print_academic_paper(paper: AcademicPaper):
+    print(f"# {paper.title}\n")
+    print("## Abstract\n")
+    print(paper.abstract + "\n")
+
+    sections = [
+        ("Introduction", paper.introduction),
+        ("Literature Review", paper.literature_review),
+        ("Methodology", paper.methodology),
+        ("Results", paper.results),
+        ("Discussion", paper.discussion),
+        ("Conclusion", paper.conclusion),
+    ]
+
+    for header, content in sections:
+        print(f"## {header}\n")
+        print(content + "\n")
+
+    print("## References\n")
+    for ref in paper.references:
+        print(f"- {ref}")
+
+
+async def save_academic_paper_markdown(
+    paper: AcademicPaper, output_dir: str = "generated_papers"
+) -> str:
+    """
+    Save the academic paper as a markdown file in a specified directory.
+    Args:
+        paper: The academic paper to save
+        output_dir: Directory where to save the markdown files (default: 'generated_papers')
+    Returns:
+        str: Path to the saved file
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create a filename from the paper title
+    safe_title = "".join(c for c in paper.title if c.isalnum() or c.isspace()).rstrip()
+    safe_title = safe_title.replace(" ", "_").lower()
+    filename = f"{safe_title}_{datetime.now().strftime('%Y%m%d')}.md"
+    output_path = os.path.join(output_dir, filename)
+
+    markdown_content = [
+        f"# {paper.title}\n",
+        "## Abstract\n",
+        f"{paper.abstract}\n",
+        "## Keywords\n",
+        ", ".join(paper.keywords) + "\n",
+        "## Introduction\n",
+        f"{paper.introduction}\n",
+        "## Literature Review\n",
+        f"{paper.literature_review}\n",
+        "## Methodology\n",
+        f"{paper.methodology}\n",
+        "## Results\n",
+        f"{paper.results}\n",
+        "## Discussion\n",
+        f"{paper.discussion}\n",
+        "## Conclusion\n",
+        f"{paper.conclusion}\n",
+        "## References\n",
+        "\n".join(f"- {ref}" for ref in paper.references),
+    ]
+
+    # Write to file
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(markdown_content))
+
+    return output_path
+
+
 async def main():
-    if len(sys.argv) != 2:
-        print('Usage: python arxiv_agent_cli.py "Your query"')
+    if len(sys.argv) < 2:
+        print('Usage: python arxiv_agent_cli.py "Your query" [output_directory]')
         sys.exit(1)
 
     user_query = sys.argv[1]
+    # Allow optional output directory specification
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else "generated_papers"
+
     report = await run_pipeline(user_query)
     if not report:
         print("No summary report generated.")
         return
 
-    # Pretty-print final output
-    print(f"# {report.title}\n")
-    print("## Papers\n")
-    for p in report.papers:
-        if p.include:
-            print(f"- **{p.title}**  (ID: {p.reference_id})")
-            print(f"  - Authors: {', '.join(p.authors)}")
-            print(f"  - URL: {p.url}")
-            print(f"  - Published: {p.published}")
-            print(f"  - Abstract:\n    {p.abstract}\n")
+    # Print to console
+    print_academic_paper(report)
 
-    print("## Summary\n")
-    print(report.summary)
+    # Save to markdown file
+    try:
+        output_file = await save_academic_paper_markdown(report, output_dir)
+        print(f"\nMarkdown report saved to: {output_file}")
 
-    print("\n## State of the Art Analysis\n")
-    print(report.state_of_the_art_analysis)
+        # Print the contents of the output directory
+        files = os.listdir(output_dir)
+        print(f"\nContents of {output_dir}/:")
+        for file in files:
+            print(f"- {file}")
 
-    print("\n## References\n")
-    for ref in report.references:
-        print(f"- {ref}")
+    except Exception as e:
+        print(f"\nError saving markdown file: {str(e)}")
 
 
 if __name__ == "__main__":
