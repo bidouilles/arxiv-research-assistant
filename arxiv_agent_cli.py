@@ -12,6 +12,7 @@ Example:
 import asyncio
 import os
 import sys
+import logging
 from datetime import datetime
 from typing import List, Optional
 from dataclasses import dataclass
@@ -28,13 +29,36 @@ from openai import AsyncOpenAI
 
 import logfire
 
+# -------------- Logging Configuration --------------
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Capture all levels of logs
+
+# Create handlers
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)  # INFO level for console
+
+file_handler = logging.FileHandler("arxiv_agent.log")
+file_handler.setLevel(logging.DEBUG)  # DEBUG level for file
+
+# Create formatters and add to handlers
+formatter = logging.Formatter(
+    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
+# Add handlers to the logger
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
 # -------------- Load environment --------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 MODEL_NAME = os.getenv("LLM_MODEL", "gpt-4o-mini")
-DEFAULT_YEAR_RANGE = 5  # Default to 5 years if not specified
+DEFAULT_YEAR_RANGE = 3  # Default to 3 years if not specified
 DEFAULT_ARXIV_MAX_RESULTS = 10  # Default to 10 results if not specified
-print(f"Using model: {MODEL_NAME}")
+logger.info(f"Using model: {MODEL_NAME}")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -161,10 +185,13 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
     Improve the search query specifically for arXiv's search engine with date filtering.
     Return only the refined query string in unencoded format for the Python arxiv library.
     """
-    # Calculate date range for last 5 years
+    logger.debug("Starting refine_query tool")
+    # Calculate date range for last `year_range` years
     current_year = datetime.now().year
     current_month = datetime.now().month
-    from_date = f"{current_year-ctx.deps.year_range}{str(current_month).zfill(2)}010000"
+    from_date = (
+        f"{current_year - ctx.deps.year_range}{str(current_month).zfill(2)}010000"
+    )
     to_date = f"{current_year}{str(current_month).zfill(2)}312359"
 
     prompt = {
@@ -203,24 +230,29 @@ async def refine_query(ctx: RunContext[PipelineState], user_query: str) -> str:
         "content": f"Craft an arXiv search query for: {user_query}",
     }
 
-    response = await ctx.deps.openai_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[prompt, user_message],
-        temperature=0.3,
-        max_tokens=200,
-    )
+    try:
+        response = await ctx.deps.openai_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[prompt, user_message],
+            temperature=0.3,
+            max_tokens=200,
+        )
+        refined_query = response.choices[0].message.content.strip()
+        if not refined_query:
+            logger.warning("Received empty refined query. Using original query.")
+            refined_query = user_query
 
-    refined_query = response.choices[0].message.content
-    if refined_query is None:
-        refined_query = user_query
+        # Add date range to the query
+        date_filter = f" AND submittedDate:[{from_date} TO {to_date}]"
+        refined_query = refined_query + date_filter
 
-    # Add date range to the query
-    date_filter = f" AND submittedDate:[{from_date} TO {to_date}]"
-    refined_query = refined_query + date_filter
+        ctx.deps.refined_query = refined_query
+        logger.info(f"Refined query: {refined_query}")
+        return refined_query
 
-    ctx.deps.refined_query = refined_query
-    print(f"Refined query: {refined_query}")
-    return refined_query
+    except Exception as e:
+        logger.exception("Error in refine_query tool")
+        raise ModelRetry(f"Failed to refine query: {str(e)}") from e
 
 
 class AsyncIteratorWrapper:
@@ -244,40 +276,49 @@ async def arxiv_search(ctx: RunContext[PipelineState]) -> List[ArxivPaper]:
     Use the refined_query from the pipeline state to search on arXiv (CS category).
     Return a list of ArxivPaper objects with reference IDs.
     """
+    logger.debug("Starting arxiv_search tool")
     if not ctx.deps.refined_query:
+        logger.error("No refined query found. Call refine_query(...) first.")
         raise ModelRetry("No refined query found. Call refine_query(...) first.")
+
     refined_q = ctx.deps.refined_query
-    print(f"Refined query: {refined_q}")
+    logger.info(f"Refined query for arXiv search: {refined_q}")
 
-    # Actually query arxiv
-    client = arxiv.Client()
-    search = arxiv.Search(
-        query=refined_q,
-        max_results=ctx.deps.max_results,
-        sort_by=arxiv.SortCriterion.Relevance,
-        sort_order=arxiv.SortOrder.Descending,
-    )
-    # We'll gather results synchronously, but we want to be asynchronous
-    # let's do a small async wrapper:
-    results = []
-    ref_id_counter = 1
-    async for result in AsyncIteratorWrapper(client.results(search)):
-        ref_id = f"ref_{ref_id_counter:02d}"
-        paper = ArxivPaper(
-            title=result.title,
-            authors=[str(a) for a in result.authors],
-            abstract=result.summary,
-            url=result.pdf_url,
-            published=result.published,
-            reference_id=ref_id,
+    try:
+        # Actually query arxiv
+        client = arxiv.Client()
+        search = arxiv.Search(
+            query=refined_q,
+            max_results=ctx.deps.max_results,
+            sort_by=arxiv.SortCriterion.Relevance,
+            sort_order=arxiv.SortOrder.Descending,
         )
-        results.append(paper)
-        ref_id_counter += 1
-        print(f"Found paper: {paper.title}")
+        # We'll gather results asynchronously using the AsyncIteratorWrapper
+        results = []
+        ref_id_counter = 1
+        async for result in AsyncIteratorWrapper(client.results(search)):
+            ref_id = f"ref_{ref_id_counter:02d}"
+            paper = ArxivPaper(
+                title=result.title,
+                authors=[str(a) for a in result.authors],
+                abstract=result.summary,
+                url=result.pdf_url,
+                published=result.published,
+                reference_id=ref_id,
+            )
+            results.append(paper)
+            logger.debug(f"Found paper: {paper.title}")
+            ref_id_counter += 1
 
-    # store them in pipeline state
-    ctx.deps.papers = results
-    return results
+        logger.info(f"Total papers found: {len(results)}")
+
+        # Store them in pipeline state
+        ctx.deps.papers = results
+        return results
+
+    except Exception as e:
+        logger.exception("Error during arxiv_search tool execution")
+        raise ModelRetry(f"Failed to search arXiv: {str(e)}") from e
 
 
 @agent.tool  # Tool #3
@@ -288,13 +329,15 @@ async def evaluate_paper(
     Evaluate the paper at index 'paper_index' in ctx.deps.papers.
     Return the updated ArxivPaper with 'include=True' if relevant, else False.
     """
+    logger.debug(f"Starting evaluate_paper tool for paper index: {paper_index}")
     if paper_index < 0 or paper_index >= len(ctx.deps.papers):
-        print(
-            f"Warning: paper_index {paper_index} out of range (0-{len(ctx.deps.papers)-1})"
+        logger.warning(
+            f"paper_index {paper_index} out of range (0-{len(ctx.deps.papers)-1})"
         )
         return None
 
     paper = ctx.deps.papers[paper_index]
+    logger.info(f"Evaluating paper: {paper.title}")
 
     prompt = {
         "role": "system",
@@ -319,45 +362,55 @@ Abstract: {paper.abstract}
 Return JSON only.""",
     }
 
-    response = await ctx.deps.openai_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[prompt, user_message],
-        temperature=0.2,
-        max_tokens=100,
-        response_format={"type": "json_object"},
-    )
-
-    response_text = response.choices[0].message.content
-    if not response_text:
-        raise ValueError("Empty response from model")
-
-    # Parse JSON response
     try:
-        evaluation = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        print(f"JSON parse error: {e}")
-        print(f"Response text: {response_text}")
-        # Fallback scoring if JSON parsing fails
-        evaluation = {"score": 0.0, "reason": "Failed to parse evaluation"}
+        response = await ctx.deps.openai_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[prompt, user_message],
+            temperature=0.2,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
 
-    # Validate score range
-    score = float(evaluation.get("score", 0.0))
-    score = max(0.0, min(1.0, score))  # Clamp between 0 and 1
+        response_text = response.choices[0].message.content.strip()
+        if not response_text:
+            logger.warning("Empty response from model. Using default evaluation.")
+            evaluation = {"score": 0.0, "reason": "Empty evaluation response"}
+        else:
+            # Parse JSON response
+            try:
+                evaluation = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parse error: {e}")
+                logger.debug(f"Response text: {response_text}")
+                # Fallback scoring if JSON parsing fails
+                evaluation = {"score": 0.0, "reason": "Failed to parse evaluation"}
 
-    # Update paper in state
-    paper.relevance_score = score
-    paper.include = score >= 0.7  # Threshold for inclusion
+        # Validate score range
+        score = float(evaluation.get("score", 0.0))
+        score = max(0.0, min(1.0, score))  # Clamp between 0 and 1
 
-    # Store rejection reason if applicable
-    if "reason" in evaluation:  # Check if reason is present
-        paper.rejection_reason = evaluation["reason"]
+        # Update paper in state
+        paper.relevance_score = score
+        paper.include = score >= 0.7  # Threshold for inclusion
 
-    print(
-        f"Evaluated {paper.title}: Score {paper.relevance_score:.2f} - Reason: {paper.rejection_reason}"
-    )
+        # Store rejection reason if applicable
+        if "reason" in evaluation:  # Check if reason is present
+            paper.rejection_reason = evaluation["reason"]
 
-    ctx.deps.papers[paper_index] = paper
-    return paper
+        # Improved Evaluation Logging
+        logger.info(
+            f"Evaluated Paper:\n"
+            f"  Title: {paper.title}\n"
+            f"  Score: {paper.relevance_score:.2f}\n"
+            f"  Reason: {paper.rejection_reason}"
+        )
+
+        ctx.deps.papers[paper_index] = paper
+        return paper
+
+    except Exception as e:
+        logger.exception(f"Error evaluating paper '{paper.title}'")
+        raise ModelRetry(f"Failed to evaluate paper: {str(e)}") from e
 
 
 # -------------- Putting it All Together --------------
@@ -377,7 +430,11 @@ def format_reference(paper: ArxivPaper) -> str:
     )
     year = paper.published.year
     arxiv_id = paper.url.split("/")[-1]
-    return f"[{paper.reference_id}] {authors} ({year}). {paper.title}. arXiv:{arxiv_id}"
+    reference = (
+        f"[{paper.reference_id}] {authors} ({year}). {paper.title}. arXiv:{arxiv_id}"
+    )
+    logger.debug(f"Formatted reference: {reference}")
+    return reference
 
 
 async def run_pipeline(
@@ -394,6 +451,7 @@ async def run_pipeline(
     The LLM is instructed to call the relevant function tools
     and eventually produce a AcademicPaper as final output.
     """
+    logger.info("Starting pipeline")
     pipeline_state = PipelineState(
         original_query=original_query,
         openai_client=openai_client,
@@ -404,24 +462,33 @@ async def run_pipeline(
     )
     usage_limits = UsageLimits(request_limit=20, total_tokens_limit=25000)
 
-    # We'll pass the user's prompt as the initial user message
-    # i.e. "I want to search for X"
-    # The system prompt already instructs the model to call the relevant tools.
-    result = await agent.run(
-        original_query,
-        deps=pipeline_state,
-        usage_limits=usage_limits,
-    )
-    included_papers = [p for p in pipeline_state.papers if p.include]
-    result.data.references = [
-        format_reference(p)
-        for p in sorted(included_papers, key=lambda x: x.relevance_score, reverse=True)
-    ]
-    return result.data
+    try:
+        # We'll pass the user's prompt as the initial user message
+        # i.e. "I want to search for X"
+        # The system prompt already instructs the model to call the relevant tools.
+        result = await agent.run(
+            original_query,
+            deps=pipeline_state,
+            usage_limits=usage_limits,
+        )
+        included_papers = [p for p in pipeline_state.papers if p.include]
+        result.data.references = [
+            format_reference(p)
+            for p in sorted(
+                included_papers, key=lambda x: x.relevance_score, reverse=True
+            )
+        ]
+        logger.info("Pipeline completed successfully")
+        return result.data
+
+    except Exception as e:
+        logger.exception("Pipeline failed")
+        raise e
 
 
 # -------------- Enhanced Output Formatting --------------
 def print_academic_paper(paper: AcademicPaper):
+    logger.debug("Printing academic paper to console")
     print(f"# {paper.title}\n")
     print("## Abstract\n")
     print(paper.abstract + "\n")
@@ -455,42 +522,52 @@ async def save_academic_paper_markdown(
     Returns:
         str: Path to the saved file
     """
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    logger.debug(f"Saving academic paper '{paper.title}' as markdown")
+    try:
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        logger.debug(f"Ensured output directory exists: {output_dir}")
 
-    # Create a filename from the paper title
-    safe_title = "".join(c for c in paper.title if c.isalnum() or c.isspace()).rstrip()
-    safe_title = safe_title.replace(" ", "_").lower()
-    filename = f"{safe_title}_{datetime.now().strftime('%Y%m%d')}.md"
-    output_path = os.path.join(output_dir, filename)
+        # Create a filename from the paper title
+        safe_title = "".join(
+            c for c in paper.title if c.isalnum() or c.isspace()
+        ).rstrip()
+        safe_title = safe_title.replace(" ", "_").lower()
+        filename = f"{safe_title}_{datetime.now().strftime('%Y%m%d')}.md"
+        output_path = os.path.join(output_dir, filename)
 
-    markdown_content = [
-        f"# {paper.title}\n",
-        "## Abstract\n",
-        f"{paper.abstract}\n",
-        "## Keywords\n",
-        ", ".join(paper.keywords) + "\n",
-        "## Introduction\n",
-        f"{paper.introduction}\n",
-        "## Literature Review\n",
-        f"{paper.literature_review}\n",
-        "## Methodology\n",
-        f"{paper.methodology}\n",
-        "## Results\n",
-        f"{paper.results}\n",
-        "## Discussion\n",
-        f"{paper.discussion}\n",
-        "## Conclusion\n",
-        f"{paper.conclusion}\n",
-        "## References\n",
-        "\n".join(f"- {ref}" for ref in paper.references),
-    ]
+        markdown_content = [
+            f"# {paper.title}\n",
+            "## Abstract\n",
+            f"{paper.abstract}\n",
+            "## Keywords\n",
+            ", ".join(paper.keywords) + "\n",
+            "## Introduction\n",
+            f"{paper.introduction}\n",
+            "## Literature Review\n",
+            f"{paper.literature_review}\n",
+            "## Methodology\n",
+            f"{paper.methodology}\n",
+            "## Results\n",
+            f"{paper.results}\n",
+            "## Discussion\n",
+            f"{paper.discussion}\n",
+            "## Conclusion\n",
+            f"{paper.conclusion}\n",
+            "## References\n",
+            "\n".join(f"- {ref}" for ref in paper.references),
+        ]
 
-    # Write to file
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(markdown_content))
+        # Write to file
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(markdown_content))
 
-    return output_path
+        logger.info(f"Markdown report saved to: {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.exception("Error saving academic paper as markdown")
+        raise e
 
 
 async def main():
@@ -533,33 +610,34 @@ Examples:
 
     args = parser.parse_args()
 
-    # Run the pipeline with the specified parameters
-    report = await run_pipeline(
-        original_query=args.query,
-        year_range=args.years,
-        max_results=args.max_results,
-    )
+    logger.info("Starting main execution")
+    logger.debug(f"Parsed arguments: {args}")
 
-    if not report:
-        print("No summary report generated.")
-        return
-
-    # Print to console
-    print_academic_paper(report)
-
-    # Save to markdown file
     try:
-        output_file = await save_academic_paper_markdown(report, args.output)
-        print(f"\nMarkdown report saved to: {output_file}")
+        # Run the pipeline with the specified parameters
+        report = await run_pipeline(
+            original_query=args.query,
+            year_range=args.years,
+            max_results=args.max_results,
+        )
 
-        # Print the contents of the output directory
-        files = os.listdir(args.output)
-        print(f"\nContents of {args.output}/:")
-        for file in files:
-            print(f"- {file}")
+        if not report:
+            logger.warning("No summary report generated.")
+            return
+
+        # Print to console
+        print_academic_paper(report)
+
+        # Save to markdown file
+        try:
+            output_file = await save_academic_paper_markdown(report, args.output)
+
+        except Exception as e:
+            logger.error(f"Error saving markdown file: {str(e)}")
 
     except Exception as e:
-        print(f"\nError saving markdown file: {str(e)}")
+        logger.critical("An unexpected error occurred during execution", exc_info=True)
+        print("An unexpected error occurred. Please check the logs for more details.")
 
 
 if __name__ == "__main__":
