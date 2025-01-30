@@ -53,16 +53,14 @@ python arxiv_agent_cli.py [options] "Your research query"
 
 ### Examples
 
-#### Computer Network Security with BGP
-
 1. BGP Security Research:
 ```bash
 python arxiv_agent_cli.py "BGP security mechanisms and attack prevention"
 ```
 
-2. RPKI and ROV Analysis:
+2. QUIC Protocol Analysis:
 ```bash
-python arxiv_agent_cli.py "RPKI and ROV deployment in BGP infrastructure"
+python arxiv_agent_cli.py "QUIC protocol security and performance analysis"
 ```
 
 3. BGP with QUIC Integration:
@@ -70,9 +68,9 @@ python arxiv_agent_cli.py "RPKI and ROV deployment in BGP infrastructure"
 python arxiv_agent_cli.py "BGP security with QUIC protocol integration"
 ```
 
-4. BGP Route Leaks Prevention:
+4. DDoS Protection:
 ```bash
-python arxiv_agent_cli.py "Detection and prevention of BGP route leaks"
+python arxiv_agent_cli.py "DDoS attack detection and mitigation techniques"
 ```
 
 #### Sample Output Structure

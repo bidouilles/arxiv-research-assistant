@@ -51,7 +51,8 @@ class ArxivPaper(BaseModel):
     published: datetime = Field(default_factory=datetime.now)
     reference_id: Optional[str] = None
     include: bool = True  # whether we keep this paper
-    relevance_score: float = Field(0.0, ge=0.0, le=1.0)  # New relevance scoring
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0)  # Relevance scoring
+    rejection_reason: Optional[str] = None  # Rejection reason
 
 
 class AcademicPaper(BaseModel):
@@ -261,7 +262,7 @@ async def arxiv_search(ctx: RunContext[PipelineState]) -> List[ArxivPaper]:
     results = []
     ref_id_counter = 1
     async for result in AsyncIteratorWrapper(client.results(search)):
-        ref_id = f"ref_{ref_id_counter}"
+        ref_id = f"ref_{ref_id_counter:02d}"
         paper = ArxivPaper(
             title=result.title,
             authors=[str(a) for a in result.authors],
@@ -288,7 +289,10 @@ async def evaluate_paper(
     Return the updated ArxivPaper with 'include=True' if relevant, else False.
     """
     if paper_index < 0 or paper_index >= len(ctx.deps.papers):
-        raise ValueError("paper_index out of range")
+        print(
+            f"Warning: paper_index {paper_index} out of range (0-{len(ctx.deps.papers)-1})"
+        )
+        return None
 
     paper = ctx.deps.papers[paper_index]
 
@@ -344,8 +348,12 @@ Return JSON only.""",
     paper.relevance_score = score
     paper.include = score >= 0.7  # Threshold for inclusion
 
+    # Store rejection reason if applicable
+    if "reason" in evaluation:  # Check if reason is present
+        paper.rejection_reason = evaluation["reason"]
+
     print(
-        f"Evaluated {paper.title}: Score {paper.relevance_score:.2f} - Reason: {evaluation['reason']}"
+        f"Evaluated {paper.title}: Score {paper.relevance_score:.2f} - Reason: {paper.rejection_reason}"
     )
 
     ctx.deps.papers[paper_index] = paper
